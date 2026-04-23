@@ -8,7 +8,7 @@ metadata:
 spec:
   progressDeadlineSeconds: 600
   revisionHistoryLimit: 10
-  replicas: 1
+  replicas: 3
   {{- with .Values.deployment.updateStrategy }}
   strategy:
     {{- toYaml . | nindent 4 }}
