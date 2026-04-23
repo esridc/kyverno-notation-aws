@@ -8,6 +8,7 @@ metadata:
 spec:
   progressDeadlineSeconds: 600
   revisionHistoryLimit: 10
+  # Bump from 1 (default) to 3 to improve availability
   replicas: 3
   {{- with .Values.deployment.updateStrategy }}
   strategy:
