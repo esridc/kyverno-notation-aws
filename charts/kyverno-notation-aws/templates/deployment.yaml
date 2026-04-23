@@ -8,7 +8,8 @@ metadata:
 spec:
   progressDeadlineSeconds: 600
   revisionHistoryLimit: 10
-  replicas: 1
+  # Bump from 1 (default) to 3 to improve availability
+  replicas: 3
   {{- with .Values.deployment.updateStrategy }}
   strategy:
     {{- toYaml . | nindent 4 }}
@@ -43,9 +44,10 @@ spec:
         resources:
           limits:
             memory: 512Mi
+            cpu: 250m
           requests:
-            memory: 32Mi
-            cpu: 100m
+            memory: 512Mi
+            cpu: 250m
         securityContext:
           runAsUser: 2000
           runAsGroup: 3000
