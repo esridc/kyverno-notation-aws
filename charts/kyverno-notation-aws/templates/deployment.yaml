@@ -38,6 +38,22 @@ spec:
           - --pluginConfigMap={{ template "kyverno-notation-aws.configMap" . }}
           - --allowInsecureRegistry={{ .Values.deployment.allowInsecureRegistry }}
           - --maxSignatureAttempts={{ .Values.deployment.maxSignatureAttempts }}
+          {{- if hasKey .Values.deployment "tokenAudiences" }}
+          {{- if not (kindIs "slice" .Values.deployment.tokenAudiences) }}
+          {{- fail "deployment.tokenAudiences must be a list of nonempty strings without commas or whitespace" }}
+          {{- end }}
+          {{- range .Values.deployment.tokenAudiences }}
+          {{- if not (kindIs "string" .) }}
+          {{- fail "deployment.tokenAudiences entries must be strings" }}
+          {{- end }}
+          {{- if or (eq . "") (regexMatch "[[:space:],\\x{0085}\\p{Z}]" .) }}
+          {{- fail "deployment.tokenAudiences entries must not be empty or contain commas or whitespace" }}
+          {{- end }}
+          {{- end }}
+          {{- if .Values.deployment.tokenAudiences }}
+          - {{ printf "--tokenAudiences=%s" (join "," .Values.deployment.tokenAudiences) | quote }}
+          {{- end }}
+          {{- end }}
           {{- if .Values.deployment.imagePullSecrets }}
           - --imagePullSecrets={{ keys .Values.deployment.imagePullSecrets | join "," }}
           {{- end }}

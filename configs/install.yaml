@@ -164,6 +164,9 @@ spec:
         - --cacheMaxSize=2000
         - --cacheTTLDurationSeconds=7200
 
+        # Set only with a compatible image and coordinated caller-token migration.
+        # - --tokenAudiences=kyverno-svc.kyverno.io
+
         # USE IF IRSA IS NOT CONFIGURED
         # - --imagePullSecrets=regcred
         resources:

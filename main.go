@@ -22,7 +22,6 @@ import (
 	tlsMgr "github.com/kyverno/pkg/tls"
 	"github.com/nirmata/kyverno-notation-verifier/kubenotation"
 	knvSetup "github.com/nirmata/kyverno-notation-verifier/setup"
-	knvVerifier "github.com/nirmata/kyverno-notation-verifier/verifier"
 	_ "github.com/notaryproject/notation-core-go/signature/cose"
 	_ "github.com/notaryproject/notation-core-go/signature/jws"
 	"github.com/pkg/errors"
@@ -64,6 +63,7 @@ func main() {
 		cacheTTLDuration            int64
 		allowedUsers                string
 		reviewKyvernoToken          bool
+		tokenAudiences              tokenAudienceList
 	)
 
 	flag.BoolVar(&flagLocal, "local", false, "Use local system notation configuration")
@@ -83,6 +83,7 @@ func main() {
 	flag.Int64Var(&cacheTTLDuration, "cacheTTLDurationSeconds", int64(1*time.Hour), "Max TTL value for a cache in seconds, default is 1 hour.")
 	flag.BoolVar(&reviewKyvernoToken, "reviewKyvernoToken", true, "Checks if the Auth token in the request is a token from kyverno controllers or other allowed users, default is true.")
 	flag.StringVar(&allowedUsers, "allowedUsers", "system:serviceaccount:kyverno:kyverno-admission-controller,system:serviceaccount:kyverno:kyverno-reports-controller", "Comma-seperated list of all the allowed users and service accounts.")
+	flag.Var(&tokenAudiences, "tokenAudiences", "Comma-separated token audiences accepted by TokenReview. Empty uses the API server audience.")
 
 	flag.Parse()
 	zc := zap.NewDevelopmentConfig()
@@ -192,18 +193,20 @@ func main() {
 		knvSetup.SetupLocal(slog)
 	}
 
-	verifier := knvVerifier.NewVerifier(slog,
-		knvVerifier.WithImagePullSecrets(flagImagePullSecrets),
-		knvVerifier.WithInsecureRegistry(flagAllowInsecureRegistry),
-		knvVerifier.WithPluginConfig(flagNotationPluginConfigMap),
-		knvVerifier.WithMaxSignatureAttempts(flagMaxSignatureAtempts),
-		knvVerifier.WithEnableDebug(flagEnableDebug),
-		knvVerifier.WithProviderKeychain(authn.NewKeychainFromHelper(ecr.NewECRHelper(ecr.WithLogger(io.Discard)))),
-		knvVerifier.WithTokenReviewEnabled(reviewKyvernoToken),
-		knvVerifier.WithCacheEnabled(cacheEnabled),
-		knvVerifier.WithMaxCacheSize(cacheMaxSize),
-		knvVerifier.WithMaxCacheTTL(time.Duration(cacheTTLDuration*int64(time.Second))),
-		knvVerifier.WithAllowedUsers(strings.Split(allowedUsers, ",")))
+	verifier := newImageVerifier(slog, verifierConfig{
+		imagePullSecrets:      flagImagePullSecrets,
+		allowInsecureRegistry: flagAllowInsecureRegistry,
+		pluginConfigMap:       flagNotationPluginConfigMap,
+		maxSignatureAttempts:  flagMaxSignatureAtempts,
+		debug:                 flagEnableDebug,
+		providerKeychain:      authn.NewKeychainFromHelper(ecr.NewECRHelper(ecr.WithLogger(io.Discard))),
+		reviewToken:           reviewKyvernoToken,
+		tokenAudiences:        tokenAudiences,
+		cacheEnabled:          cacheEnabled,
+		cacheMaxSize:          cacheMaxSize,
+		cacheTTL:              time.Duration(cacheTTLDuration * int64(time.Second)),
+		allowedUsers:          strings.Split(allowedUsers, ","),
+	})
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/checkimages", verifier.HandleCheckImages)

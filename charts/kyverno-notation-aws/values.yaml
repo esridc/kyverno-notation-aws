@@ -59,6 +59,9 @@ deployment:
   # -- Max signature attempts specifies the maximum number of signature envelopes that will be processed for verification
   maxSignatureAttempts: 30
 
+  # -- TokenReview audiences accepted from callers. Empty preserves the API server audience. Changing this requires coordinating caller token audiences.
+  tokenAudiences: []
+
 # Service account configuration
 serviceAccount:
   enabled: true

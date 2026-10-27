@@ -1,0 +1,198 @@
+name: Audience compatibility test release
+
+on:
+  push:
+    branches:
+      - rlacc-notation-audience-compatibility
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audience-test-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish-test:
+    if: github.repository == 'esridc/kyverno-notation-aws' && github.ref == 'refs/heads/rlacc-notation-audience-compatibility'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    env:
+      IMAGE: ghcr.io/esridc/kyverno-notation-aws
+      CHART: ghcr.io/esridc/charts/kyverno-notation-aws
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: actions/setup-go@6edd4406fa81c3da01a34fa6f6343087c207a568 # v3.5.0
+        with:
+          go-version: 1.26.8
+      - uses: imjasonh/setup-crane@00c9e93efa4e1138c9a7a5c594acd6c75a2fbf0c # v0.3.0
+      - uses: sigstore/cosign-installer@d7543c93d881b35a8faa02e8e3605f69b7a1ce62 # v3.10.0
+      - name: Set immutable test versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "IMAGE_TAG=dev-audience-${GITHUB_SHA}" >> "$GITHUB_ENV"
+          echo "CHART_VERSION=1.1.2-dev.${GITHUB_SHA}" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/test-release"
+          git rev-parse HEAD > "$RUNNER_TEMP/test-release/source-commit.txt"
+          git ls-files -z | xargs -0 sha256sum > "$RUNNER_TEMP/test-release/source-files.sha256"
+      - name: Authenticate CI to the fork registry
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          printf '%s' "$GHCR_TOKEN" | helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Refuse existing tags and permission errors
+        shell: bash
+        run: |
+          set -euo pipefail
+          for ref in "$IMAGE:$IMAGE_TAG" "$CHART:$CHART_VERSION"; do
+            if crane manifest "$ref" > "$RUNNER_TEMP/manifest.json" 2> "$RUNNER_TEMP/manifest-error.txt"; then
+              echo "::error::Refusing to overwrite existing artifact $ref"
+              exit 1
+            fi
+            if ! grep -Eq 'MANIFEST_UNKNOWN|NAME_UNKNOWN' "$RUNNER_TEMP/manifest-error.txt"; then
+              cat "$RUNNER_TEMP/manifest-error.txt"
+              echo "::error::Artifact absence could not be established; stopping"
+              exit 1
+            fi
+          done
+      - name: Validate source and chart
+        shell: bash
+        run: |
+          set -euo pipefail
+          go mod verify
+          go test ./... -count=1 -timeout=120s
+          go vet ./...
+          helm lint ./charts/kyverno-notation-aws
+      - name: Build amd64 image locally
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx build --platform linux/amd64 --load \
+            --label "org.opencontainers.image.source=https://github.com/esridc/kyverno-notation-aws" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --metadata-file "$RUNNER_TEMP/test-release/build-metadata.json" \
+            --tag "$IMAGE:$IMAGE_TAG" . 2>&1 | tee "$RUNNER_TEMP/test-release/build.log"
+          docker image inspect "$IMAGE:$IMAGE_TAG" > "$RUNNER_TEMP/test-release/local-image.json"
+          docker buildx build --platform linux/amd64 --target builder --load \
+            --tag "local/audience-test-builder:$GITHUB_SHA" .
+          container=$(docker create "local/audience-test-builder:$GITHUB_SHA")
+          trap 'docker rm "$container" >/dev/null' EXIT
+          docker cp "$container":/notation-aws-signer-plugin.zip "$RUNNER_TEMP/test-release/notation-aws-signer-plugin.zip"
+          sha256sum "$RUNNER_TEMP/test-release/notation-aws-signer-plugin.zip" \
+            > "$RUNNER_TEMP/test-release/plugin-archive.sha256"
+      - name: Smoke-test actual packaged executables
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --platform linux/amd64 --network none --read-only \
+            --cap-drop ALL --security-opt no-new-privileges "$IMAGE:$IMAGE_TAG" \
+            --help > "$RUNNER_TEMP/test-release/extension-help.txt" 2>&1
+          grep -q tokenAudiences "$RUNNER_TEMP/test-release/extension-help.txt"
+          printf '{"contractVersion":"1.0"}' | docker run --rm -i \
+            --platform linux/amd64 --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --entrypoint /plugins/com.amazonaws.signer.notation.plugin/notation-com.amazonaws.signer.notation.plugin \
+            "$IMAGE:$IMAGE_TAG" get-plugin-metadata \
+            > "$RUNNER_TEMP/test-release/plugin-metadata.json"
+          container=$(docker create "$IMAGE:$IMAGE_TAG")
+          trap 'docker rm "$container" >/dev/null' EXIT
+          docker cp "$container":/kyverno-notation-aws "$RUNNER_TEMP/test-release/kyverno-notation-aws"
+          docker cp "$container":/plugins/com.amazonaws.signer.notation.plugin/notation-com.amazonaws.signer.notation.plugin \
+            "$RUNNER_TEMP/test-release/notation-plugin"
+          file "$RUNNER_TEMP/test-release/kyverno-notation-aws" "$RUNNER_TEMP/test-release/notation-plugin" \
+            | tee "$RUNNER_TEMP/test-release/executable-platforms.txt"
+          grep -c 'x86-64' "$RUNNER_TEMP/test-release/executable-platforms.txt" | grep -qx 2
+          test "$(stat -c %a "$RUNNER_TEMP/test-release/notation-plugin")" = 755
+          sha256sum "$RUNNER_TEMP/test-release/kyverno-notation-aws" "$RUNNER_TEMP/test-release/notation-plugin" \
+            > "$RUNNER_TEMP/test-release/executables.sha256"
+          rm "$RUNNER_TEMP/test-release/kyverno-notation-aws" "$RUNNER_TEMP/test-release/notation-plugin"
+      - name: Generate CycloneDX SBOM
+        uses: CycloneDX/gh-gomod-generate-sbom@d4aee0cf5133055dbd98899978246c10c18c440f # v1.1.0
+        with:
+          version: v1
+          args: app -licenses -json -output test-release-bom.cdx.json -main ./
+      - name: Publish image and sign exact digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker push "$IMAGE:$IMAGE_TAG"
+          digest=$(crane digest "$IMAGE:$IMAGE_TAG")
+          ref="$IMAGE@$digest"
+          echo "IMAGE_DIGEST=$digest" >> "$GITHUB_ENV"
+          crane manifest "$ref" > "$RUNNER_TEMP/test-release/published-manifest.json"
+          crane config --platform linux/amd64 "$ref" > "$RUNNER_TEMP/test-release/published-config.json"
+          python3 - <<'PY'
+          import json, os, pathlib
+          root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "test-release"
+          local = json.loads((root / "local-image.json").read_text())[0]
+          remote = json.loads((root / "published-config.json").read_text())
+          assert remote["architecture"] == "amd64" and remote["os"] == "linux"
+          assert remote["config"]["User"] == "65532"
+          assert remote["config"]["Labels"]["org.opencontainers.image.revision"] == os.environ["GITHUB_SHA"]
+          assert remote["rootfs"]["diff_ids"] == local["RootFS"]["Layers"]
+          assert remote["config"]["Entrypoint"] == local["Config"]["Entrypoint"]
+          PY
+          cp test-release-bom.cdx.json "$RUNNER_TEMP/test-release/"
+          COSIGN_REPOSITORY="$IMAGE/signatures" cosign sign --yes \
+            -a "repo=$GITHUB_REPOSITORY" -a "workflow=$GITHUB_WORKFLOW" -a "ref=$GITHUB_SHA" "$ref"
+          COSIGN_REPOSITORY="$IMAGE/sbom" cosign attach sbom --sbom test-release-bom.cdx.json --type cyclonedx "$ref"
+          printf '%s\n' "$IMAGE:$IMAGE_TAG@$digest" > "$RUNNER_TEMP/test-release/image-reference.txt"
+      - name: Package matching digest-pinned test chart
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -R charts/kyverno-notation-aws "$RUNNER_TEMP/test-release/chart"
+          python3 - <<'PY'
+          import os, pathlib
+          path = pathlib.Path(os.environ["RUNNER_TEMP"]) / "test-release/chart/values.yaml"
+          text = path.read_text()
+          old_repo = "  repository: nirmata/kyverno-notation-aws"
+          old_tag = "  tag: ~"
+          assert text.count(old_repo) == 1 and text.count(old_tag) == 1
+          text = text.replace(old_repo, "  repository: esridc/kyverno-notation-aws")
+          text = text.replace(old_tag, '  tag: "' + os.environ["IMAGE_TAG"] + "@" + os.environ["IMAGE_DIGEST"] + '"')
+          path.write_text(text)
+          PY
+          helm package "$RUNNER_TEMP/test-release/chart" --version "$CHART_VERSION" \
+            --app-version "$IMAGE_TAG" --destination "$RUNNER_TEMP/test-release"
+          helm template test "$RUNNER_TEMP/test-release/kyverno-notation-aws-$CHART_VERSION.tgz" \
+            --set 'deployment.tokenAudiences[0]=kyverno-svc.kyverno.io' > "$RUNNER_TEMP/test-release/chart-render.yaml"
+          grep -F "$IMAGE:$IMAGE_TAG@$IMAGE_DIGEST" "$RUNNER_TEMP/test-release/chart-render.yaml"
+          grep -F -- '--tokenAudiences=kyverno-svc.kyverno.io' "$RUNNER_TEMP/test-release/chart-render.yaml"
+          sha256sum "$RUNNER_TEMP/test-release/kyverno-notation-aws-$CHART_VERSION.tgz" \
+            > "$RUNNER_TEMP/test-release/chart.sha256"
+          helm push "$RUNNER_TEMP/test-release/kyverno-notation-aws-$CHART_VERSION.tgz" oci://ghcr.io/esridc/charts
+          chart_digest=$(crane digest "$CHART:$CHART_VERSION")
+          printf '%s\n' "oci://$CHART@$chart_digest" > "$RUNNER_TEMP/test-release/chart-reference.txt"
+          mkdir "$RUNNER_TEMP/test-release/pulled-chart"
+          helm pull "oci://$CHART" --version "$CHART_VERSION" --destination "$RUNNER_TEMP/test-release/pulled-chart"
+          cmp "$RUNNER_TEMP/test-release/kyverno-notation-aws-$CHART_VERSION.tgz" \
+            "$RUNNER_TEMP/test-release/pulled-chart/kyverno-notation-aws-$CHART_VERSION.tgz"
+          COSIGN_REPOSITORY="$IMAGE/signatures" cosign sign --yes "$CHART@$chart_digest"
+      - name: Record publication and evidence limits
+        shell: bash
+        run: |
+          {
+            echo '## Dev-only amd64 test release'
+            cat "$RUNNER_TEMP/test-release/image-reference.txt"
+            cat "$RUNNER_TEMP/test-release/chart-reference.txt"
+            echo 'Cosign signatures and published CycloneDX SBOM use the existing repository channels.'
+            echo 'Local BuildKit metadata is retained; this is NOT SLSA3 release provenance.'
+            echo 'No main merge, Pages publication, or deployment is performed.'
+            echo 'Package pull access and coordinated caller-audience rollout must be verified before deployment.'
+          } | tee "$RUNNER_TEMP/test-release/summary.txt" >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: audience-test-release-${{ github.sha }}
+          path: ${{ runner.temp }}/test-release
+          if-no-files-found: error

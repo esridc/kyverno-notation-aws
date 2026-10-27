@@ -73,6 +73,41 @@ kubectl apply -f configs/install.yaml
 ```
 > Note: If you have installed Kyverno in a custom namespace or are using a custom service account, you should use the `--allowedUsers` flags to provide the list of service that can access kyverno-notation-aws. You can disable token authorization altogether using `--reviewKyvernoToken` flag.
 
+### Caller token audiences
+
+The verifier library is v1.2.0. For Kyverno versions that send a projected
+API-call token with audience `kyverno-svc.kyverno.io`, configure the extension
+with `--tokenAudiences=kyverno-svc.kyverno.io`. With Helm, use:
+
+```yaml
+deployment:
+  tokenAudiences:
+    - kyverno-svc.kyverno.io
+```
+
+The setting is a list of audiences this service accepts, not a list of caller
+identities. The application flag takes a comma-separated list; empty entries,
+commas within an audience, and whitespace are not supported. When omitted or
+empty, TokenReview still uses the API server's audience, preserving the old
+behavior. With an explicit audience, old tokens intended only for the API
+server are rejected. A token must match an accepted audience **and** a caller
+in `--allowedUsers`. Keep token review enabled; disabling authentication is
+not a compatibility fix.
+
+Stage the compatible extension image first with this setting omitted while
+callers still send old tokens. Coordinate enabling the new audience with the
+Kyverno token change: old and new audience-only tokens are not interchangeable,
+and a mixed-version rollout is not guaranteed to be uninterrupted. Coordinate
+both settings on rollback as well. There is no automatic API-server-audience
+fallback. Keep the existing trusted TLS CA, service-account/IRSA configuration,
+and Notation trust resources unchanged.
+
+This source change does not publish an image or chart. Before enabling the new
+chart value, separately build, validate, and publish an extension image and
+chart that include this code, then select that real image version. The current
+chart/image defaults and an existing `image.tag: v1.1` override do not identify
+the new implementation. The library version is not an extension image version.
+
 3. Create resources for the Notation TrustPolicy and TrustStore
 
 ```sh
@@ -185,6 +220,73 @@ Output
 Error from server: admission webhook "mutate.kyverno.svc-fail" denied the request: mutation policy check-images error: failed to apply policy check-images rules [call-aws-signer-extension: failed to load context: failed to fetch data for APICall: HTTP 406 Not Acceptable: failed to verify container kyverno-demo: failed to verify image {{844333597536.dkr.ecr.us-west-2.amazonaws.com kyverno-demo kyverno-demo v1-unsigned } /spec/containers/0/image}: no signature is associated with "844333597536.dkr.ecr.us-west-2.amazonaws.com/kyverno-demo@sha256:74a98f0e4d750c9052f092a7f7a72de7b20f94f176a490088f7a744c76c53ea5", make sure the artifact was signed successfully
 ]
 ```
+
+## Local compatibility tests
+
+Building requires Go 1.26.8 or newer. The Docker builder and shared CI setup
+use Go 1.26.8; the builder moves to Alpine 3.23 because the matching Go image
+is available there, not on Alpine 3.22.
+
+```sh
+go test ./... -count=1
+go vet ./...
+go build ./...
+helm lint ./charts/kyverno-notation-aws
+```
+
+Put Helm on `PATH` or use the existing `.tools/helm` installation to run the
+chart-rendering tests; otherwise that test is explicitly skipped. These tests
+render charts locally and do not install them. `make helm-test` is different:
+it runs against an installed Kubernetes release and is not an offline check.
+
+The handler tests use a subprocess with temporary configuration and a loopback
+API fixture to capture actual TokenReview requests. Synthetic token-review
+responses test the audience/caller/error contract, not Kubernetes token
+cryptography. Separate local TLS registry fixtures use generated signing
+certificates and real Notation signatures to check acceptance, digest mutation,
+unsigned-image rejection, untrusted certificates, and signing identities.
+Registry credentials are synthetic and exercise the configured provider
+keychain. These tests do not read real credentials or contact AWS/Kubernetes;
+they do not validate IRSA, the AWS Signer plugin, or a live Kyverno rollout.
+
+### Branch-only Dev test publication
+
+The `Audience compatibility test release` workflow runs only in the Esri fork
+on `rlacc-notation-audience-compatibility` (push or manual dispatch). It does
+not run for pull requests, `main`, or other branches. It uses the workflow's
+package-write token, not a local registry login. It refuses to overwrite an
+existing image/chart tag and stops when registry permissions prevent checking
+whether a tag exists.
+
+Each source commit gets image tag `dev-audience-<full-commit-sha>` in
+`ghcr.io/esridc/kyverno-notation-aws` and chart version
+`1.1.2-dev.<full-commit-sha>` in
+`oci://ghcr.io/esridc/charts/kyverno-notation-aws`. The OCI test chart defaults
+to that image's real tag and verified digest, never the upstream Nirmata image.
+Its audience list stays empty until the caller transition is coordinated.
+The workflow does not change repository chart versions or the public Pages
+index. A rerun for an already-published commit stops rather than replacing it.
+
+The workflow builds only amd64 because the Dockerfile downloads an amd64 AWS
+Signer plugin. It checks executable permissions and runs the actual packaged
+plugin as nonroot without networking before uploading. It publishes Cosign
+signatures and a CycloneDX module SBOM through the repository's existing
+signature/SBOM channels, and retains source hashes, build/base metadata,
+plugin archive/hash, executable hashes, smoke output, and chart hash as run
+artifacts. The module SBOM is not a full runtime/plugin SBOM. Retained
+BuildKit metadata is **not SLSA3 release provenance**. If publication fails
+partway through, inspect the run's retained evidence; do not assume artifacts
+were signed or that a matching chart was published.
+
+Before any separately approved Dev deployment, verify the run succeeded and
+use its immutable image/chart references. Confirm the cluster can pull both
+packages without changing package visibility or creating credentials silently.
+Preserve existing Helm values, TLS CA, IRSA and trust resources. Follow the
+[audience transition and rollback pairing](#caller-token-audiences): an old
+API-server-only caller needs the audience setting omitted; a scoped-only
+Kyverno caller needs `kyverno-svc.kyverno.io`. No deployment is performed by
+this workflow.
+
 # Troubleshoot
 
 1. Check service

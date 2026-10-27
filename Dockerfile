@@ -1,4 +1,4 @@
-ARG BUILDER_IMAGE="golang:1.24.4-alpine3.22"
+ARG BUILDER_IMAGE="golang:1.26.8-alpine3.23@sha256:a8fa79c5bd40d880b52bd3b6d7669ecdcfd00e85facdd427d279efb5ddd79cb1"
 
 FROM --platform=$BUILDPLATFORM $BUILDER_IMAGE AS builder
 
@@ -28,7 +28,7 @@ WORKDIR /
 # Notation home
 ENV PLUGINS_DIR=/plugins
 
-COPY --from=builder notation-com.amazonaws.signer.notation.plugin plugins/com.amazonaws.signer.notation.plugin/notation-com.amazonaws.signer.notation.plugin
+COPY --from=builder --chmod=0755 notation-com.amazonaws.signer.notation.plugin plugins/com.amazonaws.signer.notation.plugin/notation-com.amazonaws.signer.notation.plugin
 
 COPY --from=builder kyverno-notation-aws kyverno-notation-aws
 ENTRYPOINT ["/kyverno-notation-aws"]
